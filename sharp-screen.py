@@ -12,6 +12,7 @@ import json
 import zipfile
 import urllib.parse
 import requests
+import random
 
 # --- CONFIGURATION ---
 OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"]
@@ -59,6 +60,120 @@ def process_uploaded_files(uploaded_files):
             text = read_file_content(uploaded_file, uploaded_file.name)
             processed_docs.append({"name": uploaded_file.name, "text": text})
     return processed_docs
+
+# --- HELPER: DATA GENERATOR (DYNAMIC) ---
+def generate_dummy_data(jd_text=None):
+    """
+    Generates test resumes. 
+    If JD is provided -> Uses AI to generate custom matching/mismatching candidates.
+    If JD is missing -> Uses default Infrastructure profiles.
+    """
+    zip_buffer = io.BytesIO()
+    
+    # OPTION A: AI GENERATION (If JD exists)
+    if jd_text and len(jd_text) > 50:
+        try:
+            # 1. Ask GPT to create 5 archetypes based on the JD
+            prompt = f"""
+            Analyze this Job Description:
+            {jd_text[:1500]}
+            
+            Create 5 distinct fake candidate resumes (plain text format) for testing a ranking algorithm:
+            1. "The Star" (Perfect match, great tenure).
+            2. "The Stretch" (Good skills, but junior/missing one key thing).
+            3. "The Job Hopper" (Great skills, but 4 jobs in 2 years).
+            4. "The Pivot" (Good soft skills, but wrong technical background).
+            5. "The Mismatch" (Completely wrong role).
+            
+            Output strict JSON with a list of objects under key "resumes":
+            {{
+                "resumes": [
+                    {{ "filename": "Candidate_Star.txt", "content": "Name: ... \\nSummary:..." }},
+                    ...
+                ]
+            }}
+            """
+            response = client.chat.completions.create(
+                model="gpt-4o",
+                response_format={"type": "json_object"},
+                messages=[{"role": "user", "content": prompt}]
+            )
+            data = json.loads(response.choices[0].message.content)
+            resumes = data.get('resumes', [])
+
+            with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+                # We replicate the 5 personas to make a list of 15 files for bulk testing
+                for i in range(1, 16):
+                    template = resumes[(i - 1) % len(resumes)]
+                    new_name = f"Applicant_{i}_{template['filename']}"
+                    # Slight variation in content to make them unique
+                    new_content = template['content'].replace("Name:", f"Name: Applicant_{i}")
+                    zf.writestr(new_name, new_content)
+            
+            zip_buffer.seek(0)
+            return zip_buffer
+            
+        except Exception as e:
+            # If AI fails, fall back to hardcoded
+            print(f"AI Generation failed: {e}")
+
+    # OPTION B: HARDCODED FALLBACK (Infrastructure focus)
+    
+    # 1. The "Perfect" Architecture Profile
+    perfect_bio = """
+    SUMMARY: Senior Infrastructure Consultant with 15 years of experience specializing in Active Directory, Azure Identity, and VMware. 
+    Led 5 major M&A consolidation projects using Quest Migration Manager. MCSE and VCP Certified.
+    
+    EXPERIENCE:
+    - Global Bank (2018-Present): Lead Architect. Migrated 40k users to Azure AD. Implemented Tier 0 Admin Security.
+    - Healthcare Org (2014-2018): Senior Engineer. Managed 500+ ESXi hosts and VDI environment.
+    
+    SKILLS: Active Directory, Azure AD Connect, Quest Migration Manager, PowerShell (Advanced), VMware vSphere 7.0.
+    """
+
+    # 2. The "Junior/Support" Profile (Low Match)
+    junior_bio = """
+    SUMMARY: IT Support Specialist looking to move into Engineering. 3 years experience in Helpdesk.
+    
+    EXPERIENCE:
+    - Local School (2021-Present): IT Support. Reset passwords in Active Directory. Installed Printers.
+    - Best Buy (2019-2021): Geek Squad. Fixed laptops.
+    
+    SKILLS: Windows 10, Basic AD User Management, Office 365 Support, Troubleshooting.
+    """
+
+    # 3. The "Job Hopper" (Red Flag)
+    hopper_bio = """
+    SUMMARY: Systems Engineer available immediately.
+    
+    EXPERIENCE:
+    - Tech Corp (Jan 2024 - Mar 2024): Contract. Active Directory cleanup.
+    - Finance Inc (Sept 2023 - Dec 2023): SysAdmin. Left due to culture.
+    - Startup X (May 2023 - Aug 2023): Cloud Engineer. Company ran out of money.
+    - MSP LLC (Jan 2023 - Apr 2023): L2 Support.
+    
+    SKILLS: AD, DNS, DHCP, Windows Server 2019.
+    """
+    
+    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        for i in range(1, 21):
+            # Randomly assign a persona
+            roll = random.randint(1, 10)
+            
+            if roll <= 3: # 30% chance of Star
+                content = f"Name: Candidate_{i} (Architect)\nEmail: arch{i}@test.com\nLocation: Nashville, TN\n{perfect_bio}"
+                fname = f"Resume_{i}_Architect.txt"
+            elif roll <= 7: # 40% chance of Junior
+                content = f"Name: Candidate_{i} (Junior)\nEmail: jr{i}@test.com\nLocation: Remote\n{junior_bio}"
+                fname = f"Resume_{i}_Support.txt"
+            else: # 30% chance of Hopper
+                content = f"Name: Candidate_{i} (Risk)\nEmail: risk{i}@test.com\nLocation: London, UK\n{hopper_bio}"
+                fname = f"Resume_{i}_Hopper.txt"
+            
+            zf.writestr(fname, content)
+            
+    zip_buffer.seek(0)
+    return zip_buffer
 
 # --- HELPER: INTEGRATIONS ---
 def create_mailto_link(to_email, subject, body):
@@ -192,7 +307,7 @@ with st.sidebar:
     
     jd_text = ""
     if jd_input_method == "Paste Text":
-        jd_text = st.text_area("Paste JD Here", height=300)
+        jd_text = st.text_area("Paste JD Here", height=300, placeholder="Paste your Job Description...")
     else:
         jd_file = st.file_uploader("Upload JD", type=["pdf", "docx", "txt"])
         if jd_file:
@@ -202,6 +317,30 @@ with st.sidebar:
     st.header("2. Settings")
     email_recipient = st.text_input("Email Report To", "judd@sharphuman.com")
     
+    st.markdown("---")
+    st.subheader("🛠️ Demo Tools")
+    
+    # DOWNLOAD TEST DATA BUTTON (DYNAMIC)
+    if st.button("📥 Generate & Download Test Data"):
+        if jd_text:
+             with st.spinner("AI is inventing candidates for your job..."):
+                test_data = generate_dummy_data(jd_text)
+                st.download_button(
+                    label="💾 Click to Save ZIP",
+                    data=test_data,
+                    file_name="custom_test_candidates.zip",
+                    mime="application/zip"
+                )
+        else:
+            # Fallback for no JD
+             test_data = generate_dummy_data(None)
+             st.download_button(
+                label="📥 Download Default Infrastructure CVs",
+                data=test_data,
+                file_name="default_infra_candidates.zip",
+                mime="application/zip"
+            )
+
     st.markdown("---")
     if SLACK_WEBHOOK:
         st.success("✅ Slack Integrated")
