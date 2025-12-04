@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import pdfplumber
 import docx
+from docx import Document
 from openai import OpenAI
 import smtplib
 from email.mime.text import MIMEText
@@ -13,6 +14,7 @@ import zipfile
 import urllib.parse
 import requests
 import random
+from fpdf import FPDF
 
 # --- CONFIGURATION ---
 OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"]
@@ -62,14 +64,33 @@ def process_uploaded_files(uploaded_files):
     return processed_docs
 
 # --- HELPER: DATA GENERATOR (DYNAMIC) ---
+def create_pdf(content):
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_font("Arial", size=12)
+    # Handle unicode characters by replacing them with closest ascii or removing
+    safe_content = content.encode('latin-1', 'replace').decode('latin-1')
+    pdf.multi_cell(0, 10, safe_content)
+    return pdf.output(dest='S').encode('latin-1')
+
+def create_docx(content):
+    doc = Document()
+    for line in content.split('\n'):
+        doc.add_paragraph(line)
+    buffer = io.BytesIO()
+    doc.save(buffer)
+    buffer.seek(0)
+    return buffer.getvalue()
+
 def generate_dummy_data(jd_text=None):
     """
-    Generates test resumes. 
+    Generates test resumes in mixed formats (PDF, DOCX, TXT). 
     If JD is provided -> Uses AI to generate custom matching/mismatching candidates.
     If JD is missing -> Uses default Infrastructure profiles.
     """
     zip_buffer = io.BytesIO()
-    
+    resumes_data = []
+
     # OPTION A: AI GENERATION (If JD exists)
     if jd_text and len(jd_text) > 50:
         try:
@@ -88,7 +109,7 @@ def generate_dummy_data(jd_text=None):
             Output strict JSON with a list of objects under key "resumes":
             {{
                 "resumes": [
-                    {{ "filename": "Candidate_Star.txt", "content": "Name: ... \\nSummary:..." }},
+                    {{ "filename": "Candidate_Star", "content": "Name: ... \\nSummary:..." }},
                     ...
                 ]
             }}
@@ -99,78 +120,86 @@ def generate_dummy_data(jd_text=None):
                 messages=[{"role": "user", "content": prompt}]
             )
             data = json.loads(response.choices[0].message.content)
-            resumes = data.get('resumes', [])
+            resumes_data = data.get('resumes', [])
+            
+            # We replicate the 5 personas to make a list of 15 files
+            expanded_resumes = []
+            for i in range(1, 16):
+                template = resumes_data[(i - 1) % len(resumes_data)]
+                new_name = f"Applicant_{i}_{template['filename']}"
+                new_content = template['content'].replace("Name:", f"Name: Applicant_{i}")
+                expanded_resumes.append({"filename": new_name, "content": new_content})
+            resumes_data = expanded_resumes
 
-            with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-                # We replicate the 5 personas to make a list of 15 files for bulk testing
-                for i in range(1, 16):
-                    template = resumes[(i - 1) % len(resumes)]
-                    new_name = f"Applicant_{i}_{template['filename']}"
-                    # Slight variation in content to make them unique
-                    new_content = template['content'].replace("Name:", f"Name: Applicant_{i}")
-                    zf.writestr(new_name, new_content)
-            
-            zip_buffer.seek(0)
-            return zip_buffer
-            
         except Exception as e:
-            # If AI fails, fall back to hardcoded
             print(f"AI Generation failed: {e}")
 
     # OPTION B: HARDCODED FALLBACK (Infrastructure focus)
-    
-    # 1. The "Perfect" Architecture Profile
-    perfect_bio = """
-    SUMMARY: Senior Infrastructure Consultant with 15 years of experience specializing in Active Directory, Azure Identity, and VMware. 
-    Led 5 major M&A consolidation projects using Quest Migration Manager. MCSE and VCP Certified.
-    
-    EXPERIENCE:
-    - Global Bank (2018-Present): Lead Architect. Migrated 40k users to Azure AD. Implemented Tier 0 Admin Security.
-    - Healthcare Org (2014-2018): Senior Engineer. Managed 500+ ESXi hosts and VDI environment.
-    
-    SKILLS: Active Directory, Azure AD Connect, Quest Migration Manager, PowerShell (Advanced), VMware vSphere 7.0.
-    """
+    if not resumes_data:
+        # 1. The "Perfect" Architecture Profile
+        perfect_bio = """
+        SUMMARY: Senior Infrastructure Consultant with 15 years of experience specializing in Active Directory, Azure Identity, and VMware. 
+        Led 5 major M&A consolidation projects using Quest Migration Manager. MCSE and VCP Certified.
+        
+        EXPERIENCE:
+        - Global Bank (2018-Present): Lead Architect. Migrated 40k users to Azure AD. Implemented Tier 0 Admin Security.
+        - Healthcare Org (2014-2018): Senior Engineer. Managed 500+ ESXi hosts and VDI environment.
+        
+        SKILLS: Active Directory, Azure AD Connect, Quest Migration Manager, PowerShell (Advanced), VMware vSphere 7.0.
+        """
 
-    # 2. The "Junior/Support" Profile (Low Match)
-    junior_bio = """
-    SUMMARY: IT Support Specialist looking to move into Engineering. 3 years experience in Helpdesk.
-    
-    EXPERIENCE:
-    - Local School (2021-Present): IT Support. Reset passwords in Active Directory. Installed Printers.
-    - Best Buy (2019-2021): Geek Squad. Fixed laptops.
-    
-    SKILLS: Windows 10, Basic AD User Management, Office 365 Support, Troubleshooting.
-    """
+        # 2. The "Junior/Support" Profile (Low Match)
+        junior_bio = """
+        SUMMARY: IT Support Specialist looking to move into Engineering. 3 years experience in Helpdesk.
+        
+        EXPERIENCE:
+        - Local School (2021-Present): IT Support. Reset passwords in Active Directory. Installed Printers.
+        - Best Buy (2019-2021): Geek Squad. Fixed laptops.
+        
+        SKILLS: Windows 10, Basic AD User Management, Office 365 Support, Troubleshooting.
+        """
 
-    # 3. The "Job Hopper" (Red Flag)
-    hopper_bio = """
-    SUMMARY: Systems Engineer available immediately.
-    
-    EXPERIENCE:
-    - Tech Corp (Jan 2024 - Mar 2024): Contract. Active Directory cleanup.
-    - Finance Inc (Sept 2023 - Dec 2023): SysAdmin. Left due to culture.
-    - Startup X (May 2023 - Aug 2023): Cloud Engineer. Company ran out of money.
-    - MSP LLC (Jan 2023 - Apr 2023): L2 Support.
-    
-    SKILLS: AD, DNS, DHCP, Windows Server 2019.
-    """
-    
-    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        # 3. The "Job Hopper" (Red Flag)
+        hopper_bio = """
+        SUMMARY: Systems Engineer available immediately.
+        
+        EXPERIENCE:
+        - Tech Corp (Jan 2024 - Mar 2024): Contract. Active Directory cleanup.
+        - Finance Inc (Sept 2023 - Dec 2023): SysAdmin. Left due to culture.
+        - Startup X (May 2023 - Aug 2023): Cloud Engineer. Company ran out of money.
+        - MSP LLC (Jan 2023 - Apr 2023): L2 Support.
+        
+        SKILLS: AD, DNS, DHCP, Windows Server 2019.
+        """
+        
         for i in range(1, 21):
-            # Randomly assign a persona
             roll = random.randint(1, 10)
-            
-            if roll <= 3: # 30% chance of Star
+            if roll <= 3: 
                 content = f"Name: Candidate_{i} (Architect)\nEmail: arch{i}@test.com\nLocation: Nashville, TN\n{perfect_bio}"
-                fname = f"Resume_{i}_Architect.txt"
-            elif roll <= 7: # 40% chance of Junior
+                fname = f"Resume_{i}_Architect"
+            elif roll <= 7: 
                 content = f"Name: Candidate_{i} (Junior)\nEmail: jr{i}@test.com\nLocation: Remote\n{junior_bio}"
-                fname = f"Resume_{i}_Support.txt"
-            else: # 30% chance of Hopper
+                fname = f"Resume_{i}_Support"
+            else: 
                 content = f"Name: Candidate_{i} (Risk)\nEmail: risk{i}@test.com\nLocation: London, UK\n{hopper_bio}"
-                fname = f"Resume_{i}_Hopper.txt"
+                fname = f"Resume_{i}_Hopper"
+            resumes_data.append({"filename": fname, "content": content})
+
+    # Create ZIP with mixed file types
+    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        for i, resume in enumerate(resumes_data):
+            # Round-robin format selection: PDF, DOCX, TXT
+            format_type = i % 3
+            base_name = resume['filename'].replace('.txt', '') # clean any extensions from AI
             
-            zf.writestr(fname, content)
+            if format_type == 0: # PDF
+                pdf_bytes = create_pdf(resume['content'])
+                zf.writestr(f"{base_name}.pdf", pdf_bytes)
+            elif format_type == 1: # DOCX
+                docx_bytes = create_docx(resume['content'])
+                zf.writestr(f"{base_name}.docx", docx_bytes)
+            else: # TXT
+                zf.writestr(f"{base_name}.txt", resume['content'])
             
     zip_buffer.seek(0)
     return zip_buffer
