@@ -67,11 +67,16 @@ def create_mailto_link(to_email, subject, body):
     return f"mailto:{to_email}?{query_string}"
 
 def send_slack_notification(message):
-    if not SLACK_WEBHOOK: return False
+    if not SLACK_WEBHOOK:
+        return False, "Webhook URL not configured in Secrets."
     try:
-        requests.post(SLACK_WEBHOOK, json={"text": message})
-        return True
-    except: return False
+        response = requests.post(SLACK_WEBHOOK, json={"text": message})
+        if response.status_code == 200:
+            return True, "Success"
+        else:
+            return False, f"Slack API Error: {response.status_code} - {response.text}"
+    except Exception as e:
+        return False, f"Connection Error: {e}"
 
 # --- AI ANALYSIS ---
 def analyze_candidate(candidate_text, jd_text, filename):
@@ -318,21 +323,21 @@ if st.session_state.analysis_results is not None:
                 st.caption("Copy/Paste to Hiring Manager:")
                 st.code(row['Manager Blurb'], language="text")
                 if st.button("Post to Slack", key=f"sl_{index}"):
-                    if send_slack_notification(f"🔥 *New Candidate:* {row['Name']} ({row['Score']}%)\n{row['Manager Blurb']}"):
+                    success, msg = send_slack_notification(f"🔥 *New Candidate:* {row['Name']} ({row['Score']}%)\n{row['Manager Blurb']}")
+                    if success:
                         st.toast("Posted!", icon="✅")
                     else:
-                        st.error("Slack Webhook missing in Secrets.")
+                        st.error(msg)
 
             with tab4:
                 st.caption("Personalized draft to candidate:")
                 st.text_area("Copy Email:", value=row['Outreach Email'], height=150)
                 
-                # HTML BUTTON FOR MAILTO LINK
+                # HTML BUTTON FOR MAILTO LINK (REMOVED target="_blank")
                 mailto_link = create_mailto_link(row['Email'], f"Interview: {row['Name']}", row['Outreach Email'])
                 
-                # We use HTML/CSS to make a fake button because standard Markdown links don't always work nicely with mailto
                 st.markdown(f"""
-                <a href="{mailto_link}" target="_blank" style="
+                <a href="{mailto_link}" style="
                     display: inline-block;
                     padding: 0.5em 1em;
                     color: white;
