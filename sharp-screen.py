@@ -145,6 +145,12 @@ def send_summary_email(user_email, df, jd_title):
 # --- UI ---
 st.set_page_config(page_title="Sharp Screen", page_icon="⚖️", layout="wide")
 
+# --- INITIALIZE SESSION STATE ---
+if 'analysis_results' not in st.session_state:
+    st.session_state.analysis_results = None
+if 'top_candidate' not in st.session_state:
+    st.session_state.top_candidate = None
+
 # --- DISCLAIMER / BETA NOTICE ---
 with st.expander("⚠️ DISCLAIMER & BETA NOTICE (Read First)", expanded=False):
     st.warning("""
@@ -197,6 +203,12 @@ with st.sidebar:
     else:
         st.caption("🚫 Slack Not Configured")
 
+    # Clear Button
+    if st.button("Reset / Clear All"):
+        st.session_state.analysis_results = None
+        st.session_state.top_candidate = None
+        st.rerun()
+
 # --- MAIN UPLOAD ---
 st.subheader("2. Upload Candidates")
 uploaded_files = st.file_uploader(
@@ -245,69 +257,93 @@ if st.button("Run Screening Analysis", type="primary"):
             
         status_text.text("Finalizing...")
         
+        # Save to Session State
         df = pd.DataFrame(results).sort_values(by="Score", ascending=False)
+        st.session_state.analysis_results = df
+        st.session_state.top_candidate = df.iloc[0]
         
-        best = df.iloc[0]
-        st.balloons()
-        st.success(f"🏆 Top Candidate: **{best['Name']}** ({best['Score']}%)")
-        
-        # --- RESULTS CARDS ---
-        for index, row in df.iterrows():
-            with st.expander(f"{row['Score']}% - {row['Name']}"):
-                
-                # CONTACT HEADER
-                st.markdown(f"**📍 {row['Location']}** | 📧 {row['Email']} | 📞 {row['Phone']}")
-                st.divider()
-
-                # ANALYSIS
-                c1, c2 = st.columns([1, 1])
-                with c1:
-                    st.success(f"**✅ Strengths:**\n\n{row['Strengths']}")
-                with c2:
-                    st.error(f"**🚩 Red Flags:**\n\n{row['Red Flags']}")
-                
-                st.divider()
-                
-                # TABS
-                tab1, tab2, tab3, tab4, tab5 = st.tabs(["🧠 Knowledge Check", "🗣️ Behavioral", "💬 Slack", "📧 Outreach", "🙈 Blind Profile"])
-                
-                with tab1:
-                    st.caption("Ask these to test technical competence:")
-                    
-                    st.markdown(f"**Q1:** {row['TQ1']}")
-                    st.info(f"**Answer:** {row['TA1']}")
-                    
-                    st.markdown(f"**Q2:** {row['TQ2']}")
-                    st.info(f"**Answer:** {row['TA2']}")
-                    
-                    st.markdown(f"**Q3:** {row['TQ3']}")
-                    st.info(f"**Answer:** {row['TA3']}")
-
-                with tab2:
-                    st.caption("Deep dive questions based on their resume:")
-                    st.markdown(f"**1. Deployment/Design:**\n> {row['BQ1']}")
-                    st.markdown(f"**2. Complex Problem:**\n> {row['BQ2']}")
-                
-                with tab3:
-                    st.caption("Copy/Paste to Hiring Manager:")
-                    st.code(row['Manager Blurb'], language="text")
-                    if st.button("Post to Slack", key=f"sl_{index}"):
-                        if send_slack_notification(f"🔥 *New Candidate:* {row['Name']} ({row['Score']}%)\n{row['Manager Blurb']}"):
-                            st.toast("Posted!", icon="✅")
-                        else:
-                            st.error("Slack Webhook missing in Secrets.")
-
-                with tab4:
-                    st.caption("Personalized draft to candidate:")
-                    st.text_area("Copy Email:", value=row['Outreach Email'], height=150)
-                    
-                    mailto_link = create_mailto_link(row['Email'], f"Interview: {row['Name']}", row['Outreach Email'])
-                    st.link_button("📧 Open in Outlook/Gmail", mailto_link)
-
-                with tab5:
-                    st.caption("Bias-free summary for review:")
-                    st.text_area("Blind Summary:", value=row['Blind Summary'], height=150)
-
+        # Send Email Report Immediately
         if email_recipient:
             if send_summary_email(email_recipient, df, "Screening Report"):
                 st.toast("Report Sent!", icon="📧")
+        
+        st.rerun()
+
+# --- DISPLAY RESULTS (FROM SESSION STATE) ---
+if st.session_state.analysis_results is not None:
+    
+    df = st.session_state.analysis_results
+    best = st.session_state.top_candidate
+    
+    st.balloons()
+    st.success(f"🏆 Top Candidate: **{best['Name']}** ({best['Score']}%)")
+    
+    # --- RESULTS CARDS ---
+    for index, row in df.iterrows():
+        with st.expander(f"{row['Score']}% - {row['Name']}"):
+            
+            # CONTACT HEADER
+            st.markdown(f"**📍 {row['Location']}** | 📧 {row['Email']} | 📞 {row['Phone']}")
+            st.divider()
+
+            # ANALYSIS
+            c1, c2 = st.columns([1, 1])
+            with c1:
+                st.success(f"**✅ Strengths:**\n\n{row['Strengths']}")
+            with c2:
+                st.error(f"**🚩 Red Flags:**\n\n{row['Red Flags']}")
+            
+            st.divider()
+            
+            # TABS
+            tab1, tab2, tab3, tab4, tab5 = st.tabs(["🧠 Knowledge Check", "🗣️ Behavioral", "💬 Slack", "📧 Outreach", "🙈 Blind Profile"])
+            
+            with tab1:
+                st.caption("Ask these to test technical competence:")
+                st.markdown(f"**Q1:** {row['TQ1']}")
+                st.info(f"**Answer:** {row['TA1']}")
+                
+                st.markdown(f"**Q2:** {row['TQ2']}")
+                st.info(f"**Answer:** {row['TA2']}")
+                
+                st.markdown(f"**Q3:** {row['TQ3']}")
+                st.info(f"**Answer:** {row['TA3']}")
+
+            with tab2:
+                st.caption("Deep dive questions based on their resume:")
+                st.markdown(f"**1. Deployment/Design:**\n> {row['BQ1']}")
+                st.markdown(f"**2. Complex Problem:**\n> {row['BQ2']}")
+            
+            with tab3:
+                st.caption("Copy/Paste to Hiring Manager:")
+                st.code(row['Manager Blurb'], language="text")
+                if st.button("Post to Slack", key=f"sl_{index}"):
+                    if send_slack_notification(f"🔥 *New Candidate:* {row['Name']} ({row['Score']}%)\n{row['Manager Blurb']}"):
+                        st.toast("Posted!", icon="✅")
+                    else:
+                        st.error("Slack Webhook missing in Secrets.")
+
+            with tab4:
+                st.caption("Personalized draft to candidate:")
+                st.text_area("Copy Email:", value=row['Outreach Email'], height=150)
+                
+                # HTML BUTTON FOR MAILTO LINK
+                mailto_link = create_mailto_link(row['Email'], f"Interview: {row['Name']}", row['Outreach Email'])
+                
+                # We use HTML/CSS to make a fake button because standard Markdown links don't always work nicely with mailto
+                st.markdown(f"""
+                <a href="{mailto_link}" target="_blank" style="
+                    display: inline-block;
+                    padding: 0.5em 1em;
+                    color: white;
+                    background-color: #ff4b4b;
+                    border-radius: 4px;
+                    text-decoration: none;
+                    font-weight: bold;">
+                    📧 Open Draft in Outlook/Gmail
+                </a>
+                """, unsafe_allow_html=True)
+
+            with tab5:
+                st.caption("Bias-free summary for review:")
+                st.text_area("Blind Summary:", value=row['Blind Summary'], height=150)
