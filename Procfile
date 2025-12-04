@@ -1,1 +1,1 @@
-web: streamlit run ranker.py --server.port $PORT --server.address 0.0.0.0
+web: streamlit run sharp-screen.py --server.port $PORT --server.address 0.0.0.0
