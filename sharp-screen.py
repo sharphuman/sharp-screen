@@ -14,13 +14,27 @@ import zipfile
 import urllib.parse
 import requests
 import random
+import os  # <--- NEW IMPORT REQUIRED
+
 from fpdf import FPDF
 
-# --- CONFIGURATION ---
-OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"]
-GMAIL_USER = st.secrets.get("GMAIL_USER")
-GMAIL_APP_PASSWORD = st.secrets.get("GMAIL_APP_PASSWORD")
-SLACK_WEBHOOK = st.secrets.get("SLACK_WEBHOOK_URL")
+# --- CONFIGURATION (THE FIX) ---
+# This block now checks BOTH Streamlit Secrets AND System Environment Variables
+def get_secret(key_name):
+    try:
+        return st.secrets[key_name]
+    except:
+        return os.environ.get(key_name)
+
+OPENAI_API_KEY = get_secret("OPENAI_API_KEY")
+GMAIL_USER = get_secret("GMAIL_USER")
+GMAIL_APP_PASSWORD = get_secret("GMAIL_APP_PASSWORD")
+SLACK_WEBHOOK = get_secret("SLACK_WEBHOOK_URL")
+
+# Check if key exists to prevent crash
+if not OPENAI_API_KEY:
+    st.error("CRITICAL ERROR: OpenAI API Key not found. Please check Railway Variables.")
+    st.stop()
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
@@ -85,8 +99,6 @@ def create_docx(content):
 def generate_dummy_data(jd_text=None):
     """
     Generates test resumes in mixed formats (PDF, DOCX, TXT). 
-    If JD is provided -> Uses AI to generate custom matching/mismatching candidates.
-    If JD is missing -> Uses default Infrastructure profiles.
     """
     zip_buffer = io.BytesIO()
     resumes_data = []
@@ -185,21 +197,24 @@ def generate_dummy_data(jd_text=None):
                 fname = f"Resume_{i}_Hopper"
             resumes_data.append({"filename": fname, "content": content})
 
-    # Create ZIP with mixed file types
+    # WRITE ZIP with MIXED FORMATS
     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
         for i, resume in enumerate(resumes_data):
-            # Round-robin format selection: PDF, DOCX, TXT
-            format_type = i % 3
-            base_name = resume['filename'].replace('.txt', '') # clean any extensions from AI
+            # Rotate formats: 0=PDF, 1=DOCX, 2=TXT
+            fmt = i % 3
+            base = resume['filename'].replace(".txt","").replace(".pdf","").replace(".docx","")
             
-            if format_type == 0: # PDF
-                pdf_bytes = create_pdf(resume['content'])
-                zf.writestr(f"{base_name}.pdf", pdf_bytes)
-            elif format_type == 1: # DOCX
-                docx_bytes = create_docx(resume['content'])
-                zf.writestr(f"{base_name}.docx", docx_bytes)
-            else: # TXT
-                zf.writestr(f"{base_name}.txt", resume['content'])
+            if fmt == 0:
+                # Create PDF
+                data = create_pdf(resume['content'])
+                zf.writestr(f"{base}.pdf", data)
+            elif fmt == 1:
+                # Create DOCX
+                data = create_docx(resume['content'])
+                zf.writestr(f"{base}.docx", data)
+            else:
+                # Create TXT
+                zf.writestr(f"{base}.txt", resume['content'])
             
     zip_buffer.seek(0)
     return zip_buffer
@@ -226,36 +241,22 @@ def send_slack_notification(message):
 def analyze_candidate(candidate_text, jd_text, filename):
     prompt = f"""
     You are a Senior Technical Recruiter. Evaluate this candidate.
-    
-    JOB DESCRIPTION:
-    {jd_text[:2000]}
-    
-    CANDIDATE CV:
-    {candidate_text[:3000]}
+    JOB DESCRIPTION: {jd_text[:2000]}
+    CANDIDATE CV: {candidate_text[:3000]}
     
     TASK:
-    1. EXTRACT CONTACT INFO: Email, Phone, Location, LinkedIn.
-    2. SCORE (0-100): Strict match.
+    1. EXTRACT INFO: Email, Phone, Location, LinkedIn.
+    2. SCORE (0-100).
     3. SUMMARY: 2 sentences.
-    4. RED FLAGS: Gaps, hopping, missing skills.
-    
-    5. KNOWLEDGE CHECK (The "Knock-out" Test):
-       - Identify TOP 3 HARD SKILLS.
-       - Create 3 "Trivia" questions to test competence.
-       - Provide the CORRECT ANSWER.
-    
-    6. BEHAVIORAL DEEP DIVE:
-       - Q1: "Describe a time you had to DEPLOY or DESIGN..." (Contextualize).
-       - Q2: "Describe a time you had to SOLVE a complex problem..." (Contextualize).
-    
+    4. RED FLAGS: Gaps, hopping.
+    5. KNOWLEDGE CHECK: 3 Trivia Questions + Answers.
+    6. BEHAVIORAL: 2 Deep Dive Questions.
     7. EXTRAS: Manager Blurb, Outreach Email, Blind Profile.
     
     OUTPUT JSON KEYS: 
-    "email", "phone", "linkedin", "location",
-    "score", "summary", "pros", "cons", 
+    "email", "phone", "linkedin", "location", "score", "summary", "pros", "cons", 
     "tech_q1", "tech_a1", "tech_q2", "tech_a2", "tech_q3", "tech_a3", 
-    "beh_q1", "beh_q2",
-    "manager_blurb", "outreach_email", "blind_summary"
+    "beh_q1", "beh_q2", "manager_blurb", "outreach_email", "blind_summary"
     """
     try:
         response = client.chat.completions.create(
@@ -264,8 +265,7 @@ def analyze_candidate(candidate_text, jd_text, filename):
             messages=[{"role": "user", "content": prompt}]
         )
         return json.loads(response.choices[0].message.content)
-    except Exception as e:
-        return {"score": 0, "summary": "Error", "email": ""}
+    except: return {"score": 0, "summary": "Error", "email": ""}
 
 # --- EMAIL REPORT ---
 def send_summary_email(user_email, df, jd_title):
@@ -294,53 +294,33 @@ def send_summary_email(user_email, df, jd_title):
 # --- UI ---
 st.set_page_config(page_title="Sharp Screen", page_icon="⚖️", layout="wide")
 
-# --- INITIALIZE SESSION STATE ---
-if 'analysis_results' not in st.session_state:
-    st.session_state.analysis_results = None
-if 'top_candidate' not in st.session_state:
-    st.session_state.top_candidate = None
+# INITIALIZE SESSION STATE
+if 'analysis_results' not in st.session_state: st.session_state.analysis_results = None
+if 'top_candidate' not in st.session_state: st.session_state.top_candidate = None
 
-# --- DISCLAIMER / BETA NOTICE ---
-with st.expander("⚠️ DISCLAIMER & BETA NOTICE (Read First)", expanded=False):
-    st.warning("""
-    **This tool is currently in BETA.** 1. **AI Assistance Only:** This tool uses Artificial Intelligence to analyze text. It is designed to assist human recruiters, not replace them. AI can make mistakes or "hallucinate" facts.
-    2. **No Hiring Decisions:** Do not use this tool as the sole basis for hiring or rejecting a candidate. Always verify critical information manually.
-    3. **Data Privacy:** Do not upload sensitive PII (Personally Identifiable Information) unless you have authorization. Files are processed in memory and not permanently stored.
-    4. **No Warranty:** This software is provided "as is" without warranty of any kind.
-    """)
-
-# --- HEADER & VALUE PROP ---
+# HEADER
 st.title("⚖️ Sharp Screen")
 st.caption("Intelligent Candidate Analysis & Interview Prep")
-
-st.info("""
-**Executive Summary:**
-Sharp Screen turns the manual grind of resume reviewing into a strategic advantage. 
-Instead of keyword-matching, our AI reads resumes like a human expert—detecting context, spotting red flags, 
-and generating custom interview scripts—so you can focus on the conversation, not the CTRL+F.
-""")
+st.info("**Executive Summary:** Sharp Screen turns the manual grind of resume reviewing into a strategic advantage.")
 
 with st.container():
     c1, c2, c3, c4 = st.columns(4)
-    with c1: st.markdown("🚀 **Bulk Processing**<br>ZIP / PDF Support", unsafe_allow_html=True)
-    with c2: st.markdown("🧠 **Knowledge Check**<br>Auto-generated Trivia", unsafe_allow_html=True)
-    with c3: st.markdown("💬 **Behavioral**<br>Custom Interview Prompts", unsafe_allow_html=True)
-    with c4: st.markdown("📞 **Contact Extraction**<br>Auto-finds Email/Phone", unsafe_allow_html=True)
-
+    c1.markdown("🚀 **Bulk Processing**<br>ZIP / PDF Support", unsafe_allow_html=True)
+    c2.markdown("🧠 **Knowledge Check**<br>Auto-generated Trivia", unsafe_allow_html=True)
+    c3.markdown("💬 **Behavioral**<br>Custom Interview Prompts", unsafe_allow_html=True)
+    c4.markdown("📞 **Contact Extraction**<br>Auto-finds Email/Phone", unsafe_allow_html=True)
 st.divider()
 
-# --- SIDEBAR INPUTS ---
+# SIDEBAR
 with st.sidebar:
     st.header("1. The Job")
     jd_input_method = st.radio("Input Method", ["Paste Text", "Upload File"])
-    
     jd_text = ""
     if jd_input_method == "Paste Text":
-        jd_text = st.text_area("Paste JD Here", height=300, placeholder="Paste your Job Description...")
+        jd_text = st.text_area("Paste JD Here", height=300)
     else:
         jd_file = st.file_uploader("Upload JD", type=["pdf", "docx", "txt"])
-        if jd_file:
-            jd_text = read_file_content(jd_file, jd_file.name)
+        if jd_file: jd_text = read_file_content(jd_file, jd_file.name)
 
     st.divider()
     st.header("2. Settings")
@@ -348,175 +328,92 @@ with st.sidebar:
     
     st.markdown("---")
     st.subheader("🛠️ Demo Tools")
-    
-    # DOWNLOAD TEST DATA BUTTON (DYNAMIC)
     if st.button("📥 Generate & Download Test Data"):
         if jd_text:
-             with st.spinner("AI is inventing candidates for your job..."):
+             with st.spinner("AI is inventing candidates..."):
                 test_data = generate_dummy_data(jd_text)
-                st.download_button(
-                    label="💾 Click to Save ZIP",
-                    data=test_data,
-                    file_name="custom_test_candidates.zip",
-                    mime="application/zip"
-                )
+                st.download_button("💾 Save ZIP", test_data, "custom_test_candidates.zip", "application/zip")
         else:
-            # Fallback for no JD
              test_data = generate_dummy_data(None)
-             st.download_button(
-                label="📥 Download Default Infrastructure CVs",
-                data=test_data,
-                file_name="default_infra_candidates.zip",
-                mime="application/zip"
-            )
+             st.download_button("📥 Save Default ZIP", test_data, "default_candidates.zip", "application/zip")
 
-    st.markdown("---")
-    if SLACK_WEBHOOK:
-        st.success("✅ Slack Integrated")
-    else:
-        st.caption("🚫 Slack Not Configured")
-
-    # Clear Button
     if st.button("Reset / Clear All"):
         st.session_state.analysis_results = None
         st.session_state.top_candidate = None
         st.rerun()
 
-# --- MAIN UPLOAD ---
+# MAIN UPLOAD
 st.subheader("2. Upload Candidates")
-uploaded_files = st.file_uploader(
-    "Upload CVs (PDF, DOCX) or a ZIP file", 
-    type=["pdf", "docx", "zip", "txt"], 
-    accept_multiple_files=True
-)
+uploaded_files = st.file_uploader("Upload CVs (PDF, DOCX, ZIP)", type=["pdf", "docx", "zip", "txt"], accept_multiple_files=True)
 
 if st.button("Run Screening Analysis", type="primary"):
     if not jd_text or not uploaded_files:
-        st.error("Missing Data. Please upload a JD and at least one CV.")
+        st.error("Missing Data.")
     else:
-        with st.spinner("Unpacking files & Warming up AI..."):
+        with st.spinner("Processing..."):
             docs = process_uploaded_files(uploaded_files)
-        
-        st.success(f"Queue: {len(docs)} candidates. Processing now...")
-        
-        results = []
-        progress_bar = st.progress(0)
-        status_text = st.empty()
-        
-        for i, doc in enumerate(docs):
-            status_text.text(f"Screening: {doc['name']}...")
+            st.success(f"Queue: {len(docs)} candidates. Analyzing...")
+            results = []
+            progress_bar = st.progress(0)
             
-            a = analyze_candidate(doc['text'], jd_text, doc['name'])
+            for i, doc in enumerate(docs):
+                a = analyze_candidate(doc['text'], jd_text, doc['name'])
+                results.append({
+                    "Score": a.get('score', 0), "Name": doc['name'],
+                    "Email": a.get('email', 'N/A'), "Phone": a.get('phone', 'N/A'),
+                    "Location": a.get('location', 'N/A'), "LinkedIn": a.get('linkedin', ''),
+                    "Summary": a.get('summary', ''), "Strengths": a.get('pros', ''),
+                    "Red Flags": a.get('cons', ''), "Manager Blurb": a.get('manager_blurb', ''),
+                    "Outreach Email": a.get('outreach_email', ''), "Blind Summary": a.get('blind_summary', ''),
+                    "TQ1": a.get('tech_q1', ''), "TA1": a.get('tech_a1', ''),
+                    "TQ2": a.get('tech_q2', ''), "TA2": a.get('tech_a2', ''),
+                    "TQ3": a.get('tech_q3', ''), "TA3": a.get('tech_a3', ''),
+                    "BQ1": a.get('beh_q1', ''), "BQ2": a.get('beh_q2', '')
+                })
+                progress_bar.progress((i + 1) / len(docs))
             
-            results.append({
-                "Score": a.get('score', 0),
-                "Name": doc['name'],
-                "Email": a.get('email', 'N/A'),
-                "Phone": a.get('phone', 'N/A'),
-                "Location": a.get('location', 'N/A'),
-                "LinkedIn": a.get('linkedin', ''),
-                "Summary": a.get('summary', ''),
-                "Strengths": a.get('pros', ''),
-                "Red Flags": a.get('cons', ''),
-                "Manager Blurb": a.get('manager_blurb', ''),
-                "Outreach Email": a.get('outreach_email', ''),
-                "Blind Summary": a.get('blind_summary', ''),
-                "TQ1": a.get('tech_q1', ''), "TA1": a.get('tech_a1', ''),
-                "TQ2": a.get('tech_q2', ''), "TA2": a.get('tech_a2', ''),
-                "TQ3": a.get('tech_q3', ''), "TA3": a.get('tech_a3', ''),
-                "BQ1": a.get('beh_q1', ''), "BQ2": a.get('beh_q2', '')
-            })
-            progress_bar.progress((i + 1) / len(docs))
-            
-        status_text.text("Finalizing...")
-        
-        # Save to Session State
-        df = pd.DataFrame(results).sort_values(by="Score", ascending=False)
-        st.session_state.analysis_results = df
-        st.session_state.top_candidate = df.iloc[0]
-        
-        # Send Email Report Immediately
-        if email_recipient:
-            if send_summary_email(email_recipient, df, "Screening Report"):
-                st.toast("Report Sent!", icon="📧")
-        
-        st.rerun()
+            df = pd.DataFrame(results).sort_values(by="Score", ascending=False)
+            st.session_state.analysis_results = df
+            st.session_state.top_candidate = df.iloc[0]
+            if email_recipient: send_summary_email(email_recipient, df, "Screening Report")
+            st.rerun()
 
-# --- DISPLAY RESULTS (FROM SESSION STATE) ---
+# RESULTS DISPLAY
 if st.session_state.analysis_results is not None:
-    
     df = st.session_state.analysis_results
     best = st.session_state.top_candidate
-    
     st.balloons()
     st.success(f"🏆 Top Candidate: **{best['Name']}** ({best['Score']}%)")
     
-    # --- RESULTS CARDS ---
     for index, row in df.iterrows():
         with st.expander(f"{row['Score']}% - {row['Name']}"):
-            
-            # CONTACT HEADER
             st.markdown(f"**📍 {row['Location']}** | 📧 {row['Email']} | 📞 {row['Phone']}")
             st.divider()
-
-            # ANALYSIS
-            c1, c2 = st.columns([1, 1])
-            with c1:
-                st.success(f"**✅ Strengths:**\n\n{row['Strengths']}")
-            with c2:
-                st.error(f"**🚩 Red Flags:**\n\n{row['Red Flags']}")
-            
+            c1, c2 = st.columns(2)
+            c1.success(f"**✅ Strengths:**\n\n{row['Strengths']}")
+            c2.error(f"**🚩 Red Flags:**\n\n{row['Red Flags']}")
             st.divider()
             
-            # TABS
-            tab1, tab2, tab3, tab4, tab5 = st.tabs(["🧠 Knowledge Check", "🗣️ Behavioral", "💬 Slack", "📧 Outreach", "🙈 Blind Profile"])
-            
+            tab1, tab2, tab3, tab4, tab5 = st.tabs(["🧠 Knowledge", "🗣️ Behavioral", "💬 Slack", "📧 Outreach", "🙈 Blind Profile"])
             with tab1:
-                st.caption("Ask these to test technical competence:")
                 st.markdown(f"**Q1:** {row['TQ1']}")
                 st.info(f"**Answer:** {row['TA1']}")
-                
                 st.markdown(f"**Q2:** {row['TQ2']}")
                 st.info(f"**Answer:** {row['TA2']}")
-                
                 st.markdown(f"**Q3:** {row['TQ3']}")
                 st.info(f"**Answer:** {row['TA3']}")
-
             with tab2:
-                st.caption("Deep dive questions based on their resume:")
-                st.markdown(f"**1. Deployment/Design:**\n> {row['BQ1']}")
-                st.markdown(f"**2. Complex Problem:**\n> {row['BQ2']}")
-            
+                st.markdown(f"**1. Design:**\n> {row['BQ1']}")
+                st.markdown(f"**2. Problem:**\n> {row['BQ2']}")
             with tab3:
-                st.caption("Copy/Paste to Hiring Manager:")
                 st.code(row['Manager Blurb'], language="text")
                 if st.button("Post to Slack", key=f"sl_{index}"):
                     success, msg = send_slack_notification(f"🔥 *New Candidate:* {row['Name']} ({row['Score']}%)\n{row['Manager Blurb']}")
-                    if success:
-                        st.toast("Posted!", icon="✅")
-                    else:
-                        st.error(msg)
-
+                    if success: st.toast("Posted!", icon="✅")
+                    else: st.error(msg)
             with tab4:
-                st.caption("Personalized draft to candidate:")
-                st.text_area("Copy Email:", value=row['Outreach Email'], height=150)
-                
-                # HTML BUTTON FOR MAILTO LINK (REMOVED target="_blank")
-                mailto_link = create_mailto_link(row['Email'], f"Interview: {row['Name']}", row['Outreach Email'])
-                
-                st.markdown(f"""
-                <a href="{mailto_link}" style="
-                    display: inline-block;
-                    padding: 0.5em 1em;
-                    color: white;
-                    background-color: #ff4b4b;
-                    border-radius: 4px;
-                    text-decoration: none;
-                    font-weight: bold;">
-                    📧 Open Draft in Outlook/Gmail
-                </a>
-                """, unsafe_allow_html=True)
-
+                st.text_area("Email Draft:", value=row['Outreach Email'], height=150)
+                mailto = create_mailto_link(row['Email'], f"Interview: {row['Name']}", row['Outreach Email'])
+                st.markdown(f'<a href="{mailto}" style="padding:8px 16px; background-color:#ff4b4b; color:white; border-radius:4px; text-decoration:none;">📧 Open in Mail App</a>', unsafe_allow_html=True)
             with tab5:
-                st.caption("Bias-free summary for review:")
                 st.text_area("Blind Summary:", value=row['Blind Summary'], height=150)
