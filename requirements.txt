@@ -5,3 +5,5 @@ pdfplumber
 python-docx
 openpyxl
 fpdf
+anthropic
+pypdf
